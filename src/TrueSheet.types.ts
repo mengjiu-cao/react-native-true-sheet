@@ -131,6 +131,22 @@ export interface TrueSheetProps extends ViewProps {
   dimmed?: boolean
 
   /**
+   * Initially present the sheet, after mounting, at a given size index.
+   *
+   * @note This property is only used during the initial mount.
+   * @default -1
+   */
+  initialIndex?: number
+
+  /**
+   * Specify whether the sheet should animate after mounting.
+   * Used with `initialIndex`.
+   *
+   * @default true
+   */
+  initialIndexAnimated?: boolean
+
+  /**
    * The size index that the sheet should start to dim the background.
    * This is ignored if `dimmed` is set to `false`.
    *
@@ -204,6 +220,11 @@ export interface TrueSheetProps extends ViewProps {
    * A component that floats at the bottom of the Sheet.
    */
   FooterComponent?: ComponentType<unknown> | ReactElement
+
+  /**
+   * This is called when the sheet is ready to present.
+   */
+  onMount?: () => void
 
   /**
    * Called when the Sheet has been presented.

@@ -23,12 +23,23 @@ inline TopCorners topCorners(double width, double height, double left, double ri
   return {left * scale, right * scale};
 }
 
-// Only the small, axis-aligned resting iOS floating-sheet inset is eligible.
-// Never invert rotation, a large drag translation, or a collapsed scale.
-inline bool canCompensate(double a, double b, double c, double d, double tx, double ty) {
-  return std::isfinite(a) && std::isfinite(d) && a >= 0.8 && a <= 1 &&
-    d >= 0.8 && d <= 1 &&
-    std::fabs(b) < 0.0001 && std::fabs(c) < 0.0001 &&
-    std::fabs(tx) <= 40 && std::fabs(ty) <= 40;
+struct ChromeGeometry {
+  TopCorners top;
+  double bottom;
+  double borderWidth;
+};
+
+inline ChromeGeometry chromeGeometry(double width, double height, double left, double right,
+                                     double bottom, double borderWidth) {
+  width = nonnegative(width);
+  height = nonnegative(height);
+  const TopCorners top = topCorners(width, height, left, right);
+  return {
+    top,
+    std::fmin(nonnegative(bottom),
+              std::fmin(width / 2, height - std::fmax(top.left, top.right))),
+    std::fmin(nonnegative(borderWidth), std::fmin(width, height))
+  };
 }
+
 } // namespace truesheet

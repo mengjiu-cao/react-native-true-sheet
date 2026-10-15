@@ -13,6 +13,7 @@
 #import "core/TrueSheetDetentCalculator.h"
 #import "core/TrueSheetGrabberView.h"
 #import "core/TrueSheetChromeGeometry.h"
+#import "core/TrueSheetRootView.h"
 #import "utils/BlurUtil.h"
 #import "utils/GestureUtil.h"
 #import "utils/PlatformUtil.h"
@@ -61,18 +62,38 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
 @end
 
-// VoiceOver delivers the two-finger Z (escape) gesture by walking up the view
-// hierarchy from the focused element, so the sheet's root view handles it.
-@interface TrueSheetControllerView : UIView
-@property (nonatomic, weak) TrueSheetViewController *controller;
+// A snapshot belongs only to this sheet's bounded ancestor chain. Restore each
+// property only while it still contains our override; UIKit may reclaim it.
+@interface TrueSheetShadowState : NSObject
+@property (nonatomic, weak) UIView *view;
+@property (nonatomic) float opacity;
+@property (nonatomic) CGFloat radius;
+@property (nonatomic, strong) UIColor *color;
+@property (nonatomic, strong) UIBezierPath *path;
 @end
 
-@implementation TrueSheetControllerView
+@implementation TrueSheetShadowState
+@end
 
-- (BOOL)accessibilityPerformEscape {
-  return [self.controller accessibilityPerformEscape];
+// Inverse scaling can expose content outside UIKit's wrapper hit bounds.
+// Forward only that strip; the returned view keeps its original recognizers.
+@interface TrueSheetEdgeTouchView : UIView
+@property (nonatomic, weak) UIView *contentView;
+@property (nonatomic, weak) UIView *wrapperView;
+@end
+
+@implementation TrueSheetEdgeTouchView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+  UIView *content = self.contentView;
+  UIView *wrapper = self.wrapperView;
+  if (!content || !wrapper || !self.userInteractionEnabled || self.hidden || self.alpha < 0.01) return nil;
+  for (UIView *view = content; view && view != self.superview; view = view.superview) {
+    if (!view.userInteractionEnabled || view.hidden || view.alpha < 0.01) return nil;
+  }
+  CGPoint wrapperPoint = [wrapper convertPoint:point fromView:self];
+  if (CGRectContainsPoint(wrapper.bounds, wrapperPoint)) return nil;
+  return [content hitTest:[content convertPoint:point fromView:self] withEvent:event];
 }
-
 @end
 
 @implementation TrueSheetViewController {
@@ -84,6 +105,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
   CADisplayLink *_transitioningTimer;
   UIView *_transitionFakeView;
+  NSUInteger _transitionGeneration;
   BOOL _isDragging;
   BOOL _isTransitioning;
   BOOL _isTransitionSnapping;
@@ -107,18 +129,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   TrueSheetGrabberView *_grabberView;
   TrueSheetDetentCalculator *_detentCalculator;
 
-  UIView *_surfaceBackgroundView;
-  CAShapeLayer *_topBorderLayer;
-  CAShapeLayer *_cornerMask;
-  __weak UIView *_chromeSurface;
-  CALayer *_previousSurfaceMask;
-  CGRect _chromeBounds;
-  CGFloat _chromeLeftRadius;
-  CGFloat _chromeRightRadius;
-  CGFloat _chromeBorderWidth;
-  CGFloat _chromeBottomRadius;
+  NSMutableArray<TrueSheetShadowState *> *_shadowStates;
   CGFloat _systemCornerRadius;
-  BOOL _chromeIndependentCorners;
   BOOL _chromeLayoutQueued;
 
   UIView *_dimHost;
@@ -128,16 +140,16 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   NSUInteger _dimmerGeneration;
 
   __weak UIView *_compensatedSurface;
-  __weak UIView *_compensatedShadow;
   CGAffineTransform _surfaceOriginalTransform;
   CGAffineTransform _surfaceAppliedTransform;
-  float _originalShadowOpacity;
+  TrueSheetEdgeTouchView *_edgeTouchView;
 }
 
 #pragma mark - Initialization
 
 - (instancetype)init {
   if (self = [super initWithNibName:nil bundle:nil]) {
+    self.modalPresentationStyle = UIModalPresentationPageSheet;
     _detents = @[ @0.5, @1 ];
     _contentHeight = @(0);
     _headerHeight = @(0);
@@ -266,8 +278,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 #pragma mark - View Lifecycle
 
 - (void)loadView {
-  TrueSheetControllerView *view = [[TrueSheetControllerView alloc] init];
-  view.controller = self;
+  TrueSheetRootView *view = [[TrueSheetRootView alloc] init];
+  view.accessibilityController = self;
   self.view = view;
 }
 
@@ -448,7 +460,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     presentedView.accessibilityElements = accessibilityElements;
 
     // The system grabber is a sibling of our root view, so an escape performed while it
-    // is focused walks presentedView → window and never reaches TrueSheetControllerView.
+    // is focused walks presentedView → window and never reaches TrueSheetRootView.
     if (@available(iOS 17.0, *)) {
       __weak __typeof(self) weakSelf = self;
       presentedView.accessibilityPerformEscapeBlock = ^BOOL {
@@ -541,6 +553,15 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     [_parentSheetController.delegate viewControllerDidFocus];
     [_parentSheetController setSheetAccessibilityElementsHidden:NO];
     [_parentSheetController setupAccessibilityContainer];
+    __weak TrueSheetViewController *parentSheet = _parentSheetController;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      // Interactive UIKit dismissal does not pass through the parent's dismiss
+      // completion. Reclaim its decoration only after UIKit unlinks the child.
+      if (parentSheet.isPresented && !parentSheet.presentedViewController) {
+        [parentSheet updateSheetChrome];
+        [parentSheet updateOwnedDimmer];
+      }
+    });
     _parentSheetController = nil;
 
     [self.delegate viewControllerDidBlur];
@@ -747,10 +768,11 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (void)setupTransitionTracker {
-  if (!self.transitionCoordinator)
+  if (!self.transitionCoordinator || _isInteractiveDismiss || _isTransitioning)
     return;
 
   _isTransitioning = YES;
+  NSUInteger generation = ++_transitionGeneration;
 
   // Learn the resolver-vs-actual offset before emitting transition positions so
   // the interpolated index lands exactly on the target detent. The presented
@@ -769,7 +791,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   [self.transitionCoordinator
     animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
       __strong __typeof(weakSelf) strongSelf = weakSelf;
-      if (!strongSelf)
+      if (!strongSelf || generation != strongSelf->_transitionGeneration)
         return;
 
       [[context containerView] addSubview:strongSelf->_transitionFakeView];
@@ -777,11 +799,11 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
       strongSelf->_transitioningTimer = [CADisplayLink displayLinkWithTarget:strongSelf
                                                                     selector:@selector(handleTransitionTracker)];
-      [strongSelf->_transitioningTimer addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
+      [strongSelf->_transitioningTimer addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
     }
     completion:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
       __strong __typeof(weakSelf) strongSelf = weakSelf;
-      if (!strongSelf)
+      if (!strongSelf || generation != strongSelf->_transitionGeneration)
         return;
 
       [strongSelf->_transitioningTimer setPaused:YES];
@@ -789,6 +811,12 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       strongSelf->_transitioningTimer = nil;
       [strongSelf->_transitionFakeView removeFromSuperview];
       strongSelf->_isTransitioning = NO;
+      if (context.isCancelled) {
+        strongSelf->_isWillDismissEmitted = NO;
+        strongSelf->_blurView.alpha = 1;
+        [strongSelf setSheetAccessibilityElementsHidden:NO];
+        [strongSelf setupAccessibilityContainer];
+      }
       [strongSelf updateSheetChrome];
       [strongSelf updateOwnedDimmer];
       strongSelf->_isTransitionSnapping = NO;
@@ -1051,7 +1079,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   [_detentCalculator setDetentCount:self.detents.count];
   sheet.detents = detents;
 
-  if (self.dimColor || self.dimOpacity) {
+  if ([self usesOwnedDimmer]) {
     // Public API disables UIKit's dimmer; our owned sibling supplies color/taps.
     sheet.largestUndimmedDetentIdentifier = sheet.detents.lastObject.identifier;
   } else if (self.dimmed && [self.dimmedDetentIndex integerValue] == 0) {
@@ -1308,15 +1336,24 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (void)restoreEdgeCompensation {
-  // Do not overwrite a transform UIKit has since taken ownership of.
+  [_edgeTouchView removeFromSuperview];
+  _edgeTouchView = nil;
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
   if (_compensatedSurface && CGAffineTransformEqualToTransform(_compensatedSurface.transform, _surfaceAppliedTransform)) {
     _compensatedSurface.transform = _surfaceOriginalTransform;
   }
-  if (_compensatedShadow && _compensatedShadow.layer.shadowOpacity == 0) {
-    _compensatedShadow.layer.shadowOpacity = _originalShadowOpacity;
-  }
   _compensatedSurface = nil;
-  _compensatedShadow = nil;
+  for (TrueSheetShadowState *state in _shadowStates) {
+    CALayer *layer = state.view.layer;
+    if (!layer) continue;
+    if (layer.shadowOpacity == 0) layer.shadowOpacity = state.opacity;
+    if (layer.shadowRadius == 0) layer.shadowRadius = state.radius;
+    if (layer.shadowColor && CGColorGetAlpha(layer.shadowColor) == 0) layer.shadowColor = state.color.CGColor;
+    if (!layer.shadowPath) layer.shadowPath = state.path.CGPath;
+  }
+  [_shadowStates removeAllObjects];
+  [CATransaction commit];
 }
 
 - (BOOL)usesEdgeToEdgePage {
@@ -1328,67 +1365,98 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (void)updateEdgeCompensation {
-  BOOL eligible = [self usesEdgeToEdgePage] && !self.presentedViewController;
-  if (@available(iOS 26.0, *)) {
-    eligible = eligible && !self.isDesignCompatibilityMode;
-  } else {
-    eligible = NO;
-  }
-  if (!eligible) {
+  if (![self usesEdgeToEdgePage] || self.presentedViewController) {
     [self restoreEdgeCompensation];
     return;
   }
-  // Preserve our resting decoration correction during legitimate motion.
-  // Recomputing from an animated frame would cancel the drag/keyboard animation.
-  if (_isDragging || _isInteractiveDismiss || _keyboardSheetGrown || self.isBeingDismissed ||
-      (_isTransitioning && _compensatedSurface)) return;
   UIView *container = self.sheet.containerView;
   if (!container) return;
   UIView *surface = self.view;
+  BOOL compensatedScale = NO;
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
   for (NSUInteger depth = 0; surface.superview && surface.superview != container && depth < 8; depth++) {
     UIView *ancestor = surface.superview;
-    // This is the only private class probe: a bounded ancestor of our own view.
-    if ([NSStringFromClass(ancestor.class) containsString:@"UIDropShadowView"]) {
-      CGAffineTransform t = ancestor.transform;
-      if (!truesheet::canCompensate(t.a, t.b, t.c, t.d, t.tx, t.ty)) return;
-      if (_compensatedSurface && _compensatedSurface != surface) [self restoreEdgeCompensation];
-      if (!_compensatedSurface && !CGAffineTransformIsIdentity(surface.transform)) return;
-      if (_compensatedSurface && !CGAffineTransformEqualToTransform(surface.transform, _surfaceAppliedTransform)) {
-        [self restoreEdgeCompensation];
-        return;
+    TrueSheetShadowState *snapshot = nil;
+    for (TrueSheetShadowState *state in _shadowStates) {
+      if (state.view == ancestor) {
+        snapshot = state;
+        break;
       }
-      // Measure the uncorrected surface without temporarily mutating UIKit views.
-      // Frame-only floating insets (including a short sheet's bottom gap) are
-      // corrected too; the bounds/content/detent size remains untouched.
-      CGSize size = surface.bounds.size;
-      CGRect baseFrame = CGRectMake(surface.center.x - size.width / 2,
-                                    surface.center.y - size.height / 2, size.width, size.height);
-      CGRect base = [ancestor convertRect:baseFrame toView:container];
-      CGFloat leftGap = CGRectGetMinX(base) - CGRectGetMinX(container.bounds);
-      CGFloat rightGap = CGRectGetMaxX(container.bounds) - CGRectGetMaxX(base);
-      CGFloat bottomGap = CGRectGetMaxY(container.bounds) - CGRectGetMaxY(base);
-      if (size.width <= 0 || size.height <= 0 || leftGap < -0.5 || rightGap < -0.5 ||
-          leftGap > 40 || rightGap > 40 || bottomGap < -0.5 || bottomGap > 40) return;
-      if (!_compensatedSurface) {
-        _compensatedSurface = surface;
-        _compensatedShadow = ancestor;
-        _surfaceOriginalTransform = surface.transform;
-        _originalShadowOpacity = ancestor.layer.shadowOpacity;
+    }
+    if (!snapshot) {
+      snapshot = [TrueSheetShadowState new];
+      snapshot.view = ancestor;
+      snapshot.opacity = ancestor.layer.shadowOpacity;
+      snapshot.radius = ancestor.layer.shadowRadius;
+      if (ancestor.layer.shadowColor) snapshot.color = [UIColor colorWithCGColor:ancestor.layer.shadowColor];
+      if (ancestor.layer.shadowPath) snapshot.path = [UIBezierPath bezierPathWithCGPath:ancestor.layer.shadowPath];
+      if (!_shadowStates) _shadowStates = [NSMutableArray array];
+      [_shadowStates addObject:snapshot];
+    }
+    ancestor.layer.shadowOpacity = 0;
+    ancestor.layer.shadowRadius = 0;
+    ancestor.layer.shadowColor = UIColor.clearColor.CGColor;
+    ancestor.layer.shadowPath = nil;
+    if (@available(iOS 26.0, *)) {
+      // Cancel the wrapper's decorative scale AND translation. Scale alone
+      // leaves short sheets above the bottom edge. UIKit still owns the
+      // wrapper's bounds/center and the outer presentation container's motion.
+      if (!compensatedScale && [NSStringFromClass(ancestor.class) containsString:@"UIDropShadowView"]) {
+        CGAffineTransform t = ancestor.transform;
+        BOOL scaleOnly = isfinite(t.a) && isfinite(t.d) && t.a > 0.001 && t.d > 0.001 &&
+          fabs(t.b) < 0.001 && fabs(t.c) < 0.001 && isfinite(t.tx) && isfinite(t.ty);
+        BOOL ownsTransform = surface == _compensatedSurface &&
+          CGAffineTransformEqualToTransform(surface.transform, _surfaceAppliedTransform);
+        CGAffineTransform current = surface.transform;
+        BOOL surfaceScaleOnly = isfinite(current.a) && isfinite(current.d) &&
+          fabs(current.b) < 0.001 && fabs(current.c) < 0.001 &&
+          fabs(current.tx) < 0.001 && fabs(current.ty) < 0.001;
+        if (scaleOnly && (ownsTransform || surfaceScaleOnly)) {
+          if (!ownsTransform) {
+            if (_compensatedSurface != surface &&
+                CGAffineTransformEqualToTransform(_compensatedSurface.transform, _surfaceAppliedTransform)) {
+              _compensatedSurface.transform = _surfaceOriginalTransform;
+            }
+            _compensatedSurface = surface;
+            _surfaceOriginalTransform = surface.transform;
+          }
+          // Autoresizing adds frame-space deltas while we counter-transform.
+          // Resynchronize the clipping surface and our root, including pixel rounding.
+          CGRect bounds = ancestor.bounds;
+          if (!CGRectEqualToRect(surface.bounds, bounds)) surface.bounds = bounds;
+          CGPoint center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+          if (!CGPointEqualToPoint(surface.center, center)) surface.center = center;
+          UIView *rootView = self.view;
+          if (rootView.superview == surface && !CGRectEqualToRect(rootView.frame, bounds)) {
+            rootView.frame = bounds;
+          }
+          _surfaceAppliedTransform = CGAffineTransformInvert(t);
+          surface.transform = _surfaceAppliedTransform;
+          compensatedScale = YES;
+          if (fabs(t.a - 1) > 0.0001 || fabs(t.d - 1) > 0.0001 ||
+              fabs(t.tx) > 0.0001 || fabs(t.ty) > 0.0001) {
+            if (!_edgeTouchView) {
+              _edgeTouchView = [TrueSheetEdgeTouchView new];
+              _edgeTouchView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+              _edgeTouchView.accessibilityElementsHidden = YES;
+            }
+            _edgeTouchView.contentView = self.view;
+            _edgeTouchView.wrapperView = ancestor;
+            if (_edgeTouchView.superview != container) {
+              _edgeTouchView.frame = container.bounds;
+              [container addSubview:_edgeTouchView];
+            }
+          } else {
+            [_edgeTouchView removeFromSuperview];
+          }
+        }
       }
-      CGPoint targetCenter = CGPointMake(CGRectGetMidX(container.bounds),
-                                         CGRectGetMaxY(container.bounds) - size.height / 2);
-      CGPoint centerInParent = [container convertPoint:targetCenter toView:ancestor];
-      _surfaceAppliedTransform = CGAffineTransformMake(CGRectGetWidth(container.bounds) / (size.width * t.a),
-        0, 0, 1 / t.d, centerInParent.x - surface.center.x, centerInParent.y - surface.center.y);
-      if (!CGAffineTransformEqualToTransform(surface.transform, _surfaceAppliedTransform)) {
-        surface.transform = _surfaceAppliedTransform;
-      }
-      ancestor.layer.shadowOpacity = 0;
-      return;
     }
     surface = ancestor;
   }
-  [self restoreEdgeCompensation];
+  if (!compensatedScale) [_edgeTouchView removeFromSuperview];
+  [CATransaction commit];
 }
 
 - (void)removeOwnedChrome {
@@ -1398,157 +1466,36 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   [_dimHost removeFromSuperview];
   _dimHost = nil;
   _dimFill = nil;
-  [_surfaceBackgroundView removeFromSuperview];
-  _surfaceBackgroundView = nil;
-  [_topBorderLayer removeFromSuperlayer];
-  _topBorderLayer = nil;
-  if (_chromeSurface.layer.mask == _cornerMask) _chromeSurface.layer.mask = _previousSurfaceMask;
-  _cornerMask = nil;
-  _previousSurfaceMask = nil;
-  _chromeSurface = nil;
-  _chromeBounds = CGRectNull;
   _systemCornerRadius = 0;
 }
 
 - (void)updateSheetChrome {
-  UIView *surface = self.presentedView;
-  if (!surface || !self.view.window) return;
-  UIView *candidate = self.view;
-  for (NSUInteger depth = 0; candidate.superview && candidate.superview != self.sheet.containerView && depth < 8; depth++) {
-    if ([NSStringFromClass(candidate.superview.class) containsString:@"UIDropShadowView"]) {
-      surface = candidate;
-      break;
-    }
-    candidate = candidate.superview;
-  }
-  [self updateEdgeCompensation];
-  if (_chromeSurface != surface) {
-    if (_chromeSurface.layer.mask == _cornerMask) _chromeSurface.layer.mask = _previousSurfaceMask;
-    [_topBorderLayer removeFromSuperlayer];
-    [_surfaceBackgroundView removeFromSuperview];
-    _chromeSurface = surface;
-    _previousSurfaceMask = surface.layer.mask;
-    _chromeBounds = CGRectNull;
-  }
-
-  if (self.backgroundColor) {
-    if (!_surfaceBackgroundView) {
-      _surfaceBackgroundView = [UIView new];
-      _surfaceBackgroundView.userInteractionEnabled = NO;
-      _surfaceBackgroundView.accessibilityElementsHidden = YES;
-    }
-    if (_surfaceBackgroundView.superview != surface) {
-      UIView *contentBranch = self.view;
-      for (NSUInteger depth = 0; contentBranch.superview && contentBranch.superview != surface && depth < 8; depth++) {
-        contentBranch = contentBranch.superview;
-      }
-      if (contentBranch.superview == surface) {
-        [surface insertSubview:_surfaceBackgroundView belowSubview:contentBranch];
-      } else {
-        [surface insertSubview:_surfaceBackgroundView atIndex:0];
-      }
-    }
-    _surfaceBackgroundView.frame = surface.bounds;
-    _surfaceBackgroundView.backgroundColor = self.backgroundColor;
-  } else {
-    [_surfaceBackgroundView removeFromSuperview];
-    _surfaceBackgroundView = nil;
-  }
-
+  if (!self.isViewLoaded) return;
   BOOL independent = self.topLeftCornerRadius != nil || self.topRightCornerRadius != nil;
-  // Read UIKit's actual radius before asking it to stop symmetric clipping.
   if (!independent || _systemCornerRadius == 0) {
     if (!independent) _systemCornerRadius = 0;
-    UIView *ancestor = surface;
+    // Observe the system's uniform radius without installing masks/backgrounds
+    // on its views. Only our root owns the custom geometry.
+    UIView *ancestor = self.view.superview;
     for (NSUInteger depth = 0; ancestor && ancestor != self.sheet.containerView && depth < 8; depth++) {
       _systemCornerRadius = fmax(_systemCornerRadius, ancestor.layer.cornerRadius);
       ancestor = ancestor.superview;
     }
-    for (UIView *child in surface.subviews) {
-      _systemCornerRadius = fmax(_systemCornerRadius, child.layer.cornerRadius);
-    }
   }
   CGFloat fallback = self.cornerRadius ? self.cornerRadius.doubleValue : _systemCornerRadius;
-  auto corners = truesheet::topCorners(CGRectGetWidth(surface.bounds), CGRectGetHeight(surface.bounds),
-    self.topLeftCornerRadius ? self.topLeftCornerRadius.doubleValue : fallback,
-    self.topRightCornerRadius ? self.topRightCornerRadius.doubleValue : fallback);
   BOOL floatingBottom = UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPhone ||
     self.presentation == TrueSheetViewPresentation::Form;
   if (@available(iOS 26.0, *)) floatingBottom = ![self usesEdgeToEdgePage];
-  CGFloat bottomRadius = independent && floatingBottom
-    ? fmin(truesheet::nonnegative(fallback), fmin(CGRectGetWidth(surface.bounds) / 2,
-        CGRectGetHeight(surface.bounds) - fmax(corners.left, corners.right))) : 0;
-  CGFloat width = fmin(truesheet::nonnegative(self.topBorderWidth),
-                       fmin(CGRectGetWidth(surface.bounds), CGRectGetHeight(surface.bounds)));
-  if (independent) {
-    self.sheet.preferredCornerRadius = 0;
-    if (!_cornerMask) _cornerMask = [CAShapeLayer layer];
-    surface.layer.mask = _cornerMask;
-  } else if (surface.layer.mask == _cornerMask) {
-    surface.layer.mask = _previousSurfaceMask;
-  }
-  if (width > 0) {
-    if (!_topBorderLayer) {
-      _topBorderLayer = [CAShapeLayer layer];
-      _topBorderLayer.fillColor = nil;
-      _topBorderLayer.lineCap = kCALineCapButt;
-    }
-    if (_topBorderLayer.superlayer != surface.layer) [surface.layer addSublayer:_topBorderLayer];
-    _topBorderLayer.hidden = NO;
-    _topBorderLayer.strokeColor = [(self.topBorderColor ?: UIColor.separatorColor)
-      resolvedColorWithTraitCollection:self.traitCollection].CGColor;
-    _topBorderLayer.lineWidth = width;
-  } else {
-    _topBorderLayer.hidden = YES;
-  }
-
-  if (CGRectEqualToRect(_chromeBounds, surface.bounds) && _chromeLeftRadius == corners.left &&
-      _chromeRightRadius == corners.right && _chromeBorderWidth == width &&
-      _chromeBottomRadius == bottomRadius && _chromeIndependentCorners == independent) return;
-  _chromeIndependentCorners = independent;
-  _chromeBounds = surface.bounds;
-  _chromeLeftRadius = corners.left;
-  _chromeRightRadius = corners.right;
-  _chromeBorderWidth = width;
-  _chromeBottomRadius = bottomRadius;
-  CGFloat w = CGRectGetWidth(surface.bounds);
-  CGFloat h = CGRectGetHeight(surface.bounds);
-  CGFloat l = corners.left, r = corners.right;
-  [CATransaction begin];
-  [CATransaction setDisableActions:YES];
-  if (independent) {
-    UIBezierPath *mask = [UIBezierPath bezierPath];
-    [mask moveToPoint:CGPointMake(0, h - bottomRadius)];
-    [mask addLineToPoint:CGPointMake(0, l)];
-    if (l > 0) [mask addArcWithCenter:CGPointMake(l, l) radius:l startAngle:M_PI endAngle:1.5 * M_PI clockwise:YES];
-    [mask addLineToPoint:CGPointMake(w - r, 0)];
-    if (r > 0) [mask addArcWithCenter:CGPointMake(w - r, r) radius:r startAngle:1.5 * M_PI endAngle:2 * M_PI clockwise:YES];
-    [mask addLineToPoint:CGPointMake(w, h - bottomRadius)];
-    if (bottomRadius > 0) {
-      [mask addArcWithCenter:CGPointMake(w - bottomRadius, h - bottomRadius) radius:bottomRadius
-                 startAngle:0 endAngle:M_PI_2 clockwise:YES];
-    }
-    [mask addLineToPoint:CGPointMake(bottomRadius, h)];
-    if (bottomRadius > 0) {
-      [mask addArcWithCenter:CGPointMake(bottomRadius, h - bottomRadius) radius:bottomRadius
-                 startAngle:M_PI_2 endAngle:M_PI clockwise:YES];
-    }
-    [mask closePath];
-    _cornerMask.frame = surface.bounds;
-    _cornerMask.path = mask.CGPath;
-  }
-  if (width > 0) {
-    CGFloat inset = width / 2;
-    CGFloat left = fmax(l - inset, 0), right = fmax(r - inset, 0);
-    UIBezierPath *border = [UIBezierPath bezierPath];
-    [border moveToPoint:CGPointMake(inset, fmax(l, inset))];
-    if (left > 0) [border addArcWithCenter:CGPointMake(l, l) radius:left startAngle:M_PI endAngle:1.5 * M_PI clockwise:YES];
-    [border addLineToPoint:CGPointMake(w - fmax(r, inset), inset)];
-    if (right > 0) [border addArcWithCenter:CGPointMake(w - r, r) radius:right startAngle:1.5 * M_PI endAngle:2 * M_PI clockwise:YES];
-    _topBorderLayer.frame = surface.bounds;
-    _topBorderLayer.path = border.CGPath;
-  }
-  [CATransaction commit];
+  self.sheet.preferredCornerRadius = independent ? 0 :
+    (self.cornerRadius ? self.cornerRadius.doubleValue : UISheetPresentationControllerAutomaticDimension);
+  [(TrueSheetRootView *)self.view configureBackgroundColor:self.backgroundColor
+                                          topBorderWidth:self.topBorderWidth
+                                          topBorderColor:self.topBorderColor
+                                     topLeftCornerRadius:self.topLeftCornerRadius
+                                    topRightCornerRadius:self.topRightCornerRadius
+                                    fallbackCornerRadius:fallback
+                                      bottomCornerRadius:floatingBottom ? fallback : 0];
+  [self updateEdgeCompensation];
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
@@ -1586,7 +1533,6 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   }
 #endif
 
-  self.view.backgroundColor = self.backgroundColor;
   [self updateSheetChrome];
 }
 

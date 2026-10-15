@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 3.11.14-smartx.2
+
+- iOS：采用 native-sheet 的 root UIView 背景承载与局部逆缩放，保留系统 page sheet 和转场，以及 TrueSheet 档位、内容挂载、手势与键盘 owner；不引入其他呈现框架。
+- 背景、可选顶部描边及独立上角迁入 `TrueSheetRootView`，删除对 UIKit 祖先的背景和遮罩绘制。
+- 删除 smartx.1 的间距测量/横向拉伸，按参考实现仅对当前 sheet surface 抵消系统缩放，并恢复本库持有的阴影状态。
+- 为逆缩放露出的边缘转发原生触摸命中，保留顶部抓手的系统下拉；不增加手势识别器或修改 UIKit 类。
+- 修复充值等短弹层的残余底部间距：对子surface同时抵消系统装饰缩放和位移，并同步子surface与自有根容器的逻辑尺寸以消除动态测高时的autoresizing漂移及像素取整缝隙；保留外框frame、档位和外层交互位移，不增加padding或拉伸内容。
+- 默认样式与公开 props 不变；`edgeToEdge` 不隐式切换蒙层，未配置 `dimColor`/`dimOpacity` 时沿用系统蒙层。更新需重建原生包，仍保留 UIKit 内部层级的版本兼容风险。
+
 ## 3.11.14-smartx.1
 
 - iOS：增加 opt-in `edgeToEdge` 手机 page sheet 容器修正，参考 native-sheet 去除系统装饰缩放/外围留白，保留 iPad/form/窄宽度布局。

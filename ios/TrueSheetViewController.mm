@@ -12,9 +12,11 @@
 #import "core/TrueSheetBlurView.h"
 #import "core/TrueSheetDetentCalculator.h"
 #import "core/TrueSheetGrabberView.h"
+#import "core/TrueSheetChromeGeometry.h"
 #import "utils/BlurUtil.h"
 #import "utils/GestureUtil.h"
 #import "utils/PlatformUtil.h"
+#import "utils/UIView+FirstResponder.h"
 #import "utils/WindowUtil.h"
 
 #import <React/RCTLog.h>
@@ -46,6 +48,12 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 - (NSArray *)accessibilityGrabberElements;
 - (void)endInteractiveDismissState;
 - (void)emitInteractivePosition;
+- (void)updateSheetChrome;
+- (void)updateEdgeCompensation;
+- (void)restoreEdgeCompensation;
+- (void)removeOwnedChrome;
+- (void)updateOwnedDimmer;
+- (void)animateOwnedDimmerVisible:(BOOL)visible;
 - (void)animateInteractiveContainerToTransform:(CGAffineTransform)transform
                                       duration:(NSTimeInterval)duration
                           allowUserInteraction:(BOOL)allowUserInteraction
@@ -89,6 +97,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   NSUInteger _interactiveGeneration;
 
   __weak TrueSheetViewController *_parentSheetController;
+  __weak UIView *_presenterFirstResponder;
 
   UIView *_anchorView;
 
@@ -97,6 +106,32 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   TrueSheetBlurView *_blurView;
   TrueSheetGrabberView *_grabberView;
   TrueSheetDetentCalculator *_detentCalculator;
+
+  UIView *_surfaceBackgroundView;
+  CAShapeLayer *_topBorderLayer;
+  CAShapeLayer *_cornerMask;
+  __weak UIView *_chromeSurface;
+  CALayer *_previousSurfaceMask;
+  CGRect _chromeBounds;
+  CGFloat _chromeLeftRadius;
+  CGFloat _chromeRightRadius;
+  CGFloat _chromeBorderWidth;
+  CGFloat _chromeBottomRadius;
+  CGFloat _systemCornerRadius;
+  BOOL _chromeIndependentCorners;
+  BOOL _chromeLayoutQueued;
+
+  UIView *_dimHost;
+  UIView *_dimFill;
+  BOOL _dimmerDisappearing;
+  BOOL _dimmerTransitioning;
+  NSUInteger _dimmerGeneration;
+
+  __weak UIView *_compensatedSurface;
+  __weak UIView *_compensatedShadow;
+  CGAffineTransform _surfaceOriginalTransform;
+  CGAffineTransform _surfaceAppliedTransform;
+  float _originalShadowOpacity;
 }
 
 #pragma mark - Initialization
@@ -136,6 +171,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (void)dealloc {
+  [self removeOwnedChrome];
   [self restoreWindowAccessibilityElements];
   [_transitioningTimer invalidate];
   _transitioningTimer = nil;
@@ -260,6 +296,12 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       [_parentSheetController setAccessibilityContentElement:self.accessibilityContentView ?: self.view];
     }
 
+    // Custom dimming disables UIKit's dimmer, including its keyboard preservation.
+    if ([self usesOwnedDimmer] && self.dimmed && self.dimmedDetentIndex.integerValue == 0) {
+      UIView *firstResponder = [presenter.view findFirstResponder];
+      if ([firstResponder resignFirstResponder]) _presenterFirstResponder = firstResponder;
+    }
+
     dispatch_async(dispatch_get_main_queue(), ^{
       NSInteger index = self.currentDetentIndex;
       CGFloat position = self.currentPosition;
@@ -271,6 +313,11 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   }
 
   [self setupTransitionTracker];
+  _dimmerDisappearing = NO;
+  [self updateOwnedDimmer];
+  if (!_isPresented) {
+    [self animateOwnedDimmerVisible:YES];
+  }
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -295,6 +342,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   }
 
   [self setupAccessibilityContainer];
+  [self updateSheetChrome];
+  [self updateOwnedDimmer];
 }
 
 - (void)setupAccessibilityContainer {
@@ -443,6 +492,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     self.view.window.accessibilityElements = nil;
   }
 
+  // UIKit owns the parent scale while stacking another controller.
+  [self restoreEdgeCompensation];
   [super presentViewController:viewControllerToPresent animated:flag completion:completion];
 }
 
@@ -457,6 +508,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
                               // else is presented over us.
                               if (self.isPresented && self.presentedViewController == nil) {
                                 [self setupAccessibilityContainer];
+                                [self updateSheetChrome];
+                                [self updateOwnedDimmer];
                               }
                             }];
 }
@@ -468,11 +521,16 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     [self.delegate viewControllerWillBlur];
     [self.delegate viewControllerWillDismiss];
     [_parentSheetController.delegate viewControllerWillFocus];
+
+    UIView *firstResponder = _presenterFirstResponder;
+    _presenterFirstResponder = nil;
+    if (!self.presentingViewController.isBeingDismissed) [firstResponder becomeFirstResponder];
   }
 }
 
 - (void)emitDidDismissEvents {
   if (self.isBeingDismissed) {
+    [self removeOwnedChrome];
     [self restoreWindowAccessibilityElements];
     _isPresented = NO;
     _isWillDismissEmitted = NO;
@@ -492,6 +550,11 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
 - (void)viewWillDisappear:(BOOL)animated {
   [super viewWillDisappear:animated];
+  BOOL dismissing = self.isBeingDismissed;
+  for (UIViewController *presenter = self.presentingViewController; presenter; presenter = presenter.presentingViewController) {
+    dismissing = dismissing || presenter.isBeingDismissed;
+  }
+  if (dismissing) [self animateOwnedDimmerVisible:NO];
   [self restoreWindowAccessibilityElements];
   [self setSheetAccessibilityElementsHidden:YES];
 
@@ -508,6 +571,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
 - (void)viewDidDisappear:(BOOL)animated {
   [super viewDidDisappear:animated];
+  if (_dimmerDisappearing || !self.presentingViewController) [self removeOwnedChrome];
 
   // Backstop: if the sheet is torn down mid-gesture (e.g. owning view deallocated),
   // the observer can't reach us through its weak delegate, so end here to invalidate
@@ -562,6 +626,20 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
 - (void)viewDidLayoutSubviews {
   [super viewDidLayoutSubviews];
+  [self updateSheetChrome];
+  [self updateOwnedDimmer];
+  // UIKit may set its resting container scale after our layout callback.
+  // Coalesce one deferred pass; never run a permanent display link or tree walk.
+  if (self.edgeToEdge && !_chromeLayoutQueued) {
+    _chromeLayoutQueued = YES;
+    __weak __typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      __strong __typeof(weakSelf) strongSelf = weakSelf;
+      if (!strongSelf) return;
+      strongSelf->_chromeLayoutQueued = NO;
+      if (strongSelf.view.window) [strongSelf updateSheetChrome];
+    });
+  }
 
   // Update state on rotation (width change)
   CGFloat width = self.view.frame.size.width;
@@ -659,6 +737,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       }
 
       _isDragging = NO;
+      [self updateSheetChrome];
+      [self updateOwnedDimmer];
       break;
     }
     default:
@@ -709,6 +789,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       strongSelf->_transitioningTimer = nil;
       [strongSelf->_transitionFakeView removeFromSuperview];
       strongSelf->_isTransitioning = NO;
+      [strongSelf updateSheetChrome];
+      [strongSelf updateOwnedDimmer];
       strongSelf->_isTransitionSnapping = NO;
 
       // Settle after a present or detent-snap transition.
@@ -724,6 +806,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (void)handleTransitionTracker {
+  [self updateEdgeCompensation];
   if (!_isDragging && _transitionFakeView.layer) {
     CALayer *layer = _transitionFakeView.layer;
     CGFloat layerPosition = layer.presentationLayer.frame.origin.y;
@@ -968,7 +1051,10 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   [_detentCalculator setDetentCount:self.detents.count];
   sheet.detents = detents;
 
-  if (self.dimmed && [self.dimmedDetentIndex integerValue] == 0) {
+  if (self.dimColor || self.dimOpacity) {
+    // Public API disables UIKit's dimmer; our owned sibling supplies color/taps.
+    sheet.largestUndimmedDetentIdentifier = sheet.detents.lastObject.identifier;
+  } else if (self.dimmed && [self.dimmedDetentIndex integerValue] == 0) {
     sheet.largestUndimmedDetentIdentifier = nil;
   } else {
     sheet.largestUndimmedDetentIdentifier = UISheetPresentationControllerDetentIdentifierLarge;
@@ -986,6 +1072,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       }
     }
   }
+  [self updateOwnedDimmer];
 }
 
 - (UISheetPresentationControllerDetent *)detentForValue:(id)detent
@@ -1118,6 +1205,358 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   [self applyActiveDetent];
 }
 
+#pragma mark - Owned Presentation Chrome
+
+- (BOOL)usesOwnedDimmer {
+  return self.dimColor != nil || self.dimOpacity != nil;
+}
+
+- (BOOL)ownedDimmerIsActive {
+  NSInteger index = self.currentDetentIndex;
+  if (index < 0) index = MAX(0, self.activeDetentIndex);
+  return self.dimmed && index >= self.dimmedDetentIndex.integerValue;
+}
+
+- (CGFloat)ownedDimmerOpacity {
+  return self.dimOpacity ? fmin(1, truesheet::nonnegative(self.dimOpacity.doubleValue)) : 0.5;
+}
+
+- (void)handleOwnedBackdropTap:(UITapGestureRecognizer *)gesture {
+  if (gesture.state == UIGestureRecognizerStateEnded && self.dismissible &&
+      self.isTopmostPresentedController && [self ownedDimmerIsActive]) {
+    [self.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+  }
+}
+
+- (void)updateOwnedDimmer {
+  if (![self usesOwnedDimmer]) {
+    _dimmerGeneration++;
+    _dimmerTransitioning = NO;
+    [_dimHost removeFromSuperview];
+    _dimHost = nil;
+    _dimFill = nil;
+    return;
+  }
+  UIView *container = self.sheet.containerView;
+  UIView *sheetBranch = self.presentedView;
+  // Only inspect this sheet's ancestor chain, never another presentation's views.
+  for (NSUInteger depth = 0; sheetBranch && sheetBranch.superview != container && depth < 8; depth++) {
+    sheetBranch = sheetBranch.superview;
+  }
+  if (!container || !sheetBranch || sheetBranch.superview != container) return;
+  if (!_dimHost) {
+    _dimHost = [[UIView alloc] initWithFrame:container.bounds];
+    _dimHost.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _dimHost.accessibilityElementsHidden = YES;
+    [_dimHost addGestureRecognizer:[[UITapGestureRecognizer alloc]
+      initWithTarget:self action:@selector(handleOwnedBackdropTap:)]];
+    _dimFill = [[UIView alloc] initWithFrame:_dimHost.bounds];
+    _dimFill.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _dimFill.userInteractionEnabled = NO;
+    [_dimHost addSubview:_dimFill];
+  }
+  if (_dimHost.superview != container) {
+    [container insertSubview:_dimHost belowSubview:sheetBranch];
+  }
+  _dimHost.frame = container.bounds;
+  _dimFill.backgroundColor = self.dimColor ?: UIColor.blackColor;
+  BOOL active = [self ownedDimmerIsActive];
+  // Keep the host at alpha=1 even for a transparent configured dimmer: a modal
+  // backdrop must block touches, while dimmed=false must pass them through.
+  _dimHost.userInteractionEnabled = active && !self.presentedViewController;
+  if (!_dimmerTransitioning || !active) {
+    _dimHost.hidden = !active || _dimmerDisappearing;
+    _dimFill.alpha = active && !_dimmerDisappearing ? [self ownedDimmerOpacity] : 0;
+  }
+}
+
+- (void)animateOwnedDimmerVisible:(BOOL)visible {
+  [self updateOwnedDimmer];
+  _dimmerDisappearing = !visible;
+  if (!_dimHost) return;
+  _dimmerTransitioning = YES;
+  NSUInteger generation = ++_dimmerGeneration;
+  BOOL active = [self ownedDimmerIsActive];
+  _dimHost.hidden = !active;
+  if (visible) _dimFill.alpha = 0;
+  CGFloat target = visible && active ? [self ownedDimmerOpacity] : 0;
+  __weak __typeof(self) weakSelf = self;
+  BOOL queued = [self.transitionCoordinator
+    animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+      __strong __typeof(weakSelf) strongSelf = weakSelf;
+      if (strongSelf) strongSelf->_dimFill.alpha = target;
+    }
+    completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+      __strong __typeof(weakSelf) strongSelf = weakSelf;
+      if (!strongSelf || generation != strongSelf->_dimmerGeneration) return;
+      strongSelf->_dimmerTransitioning = NO;
+      strongSelf->_dimmerDisappearing = context.isCancelled ? visible : !visible;
+      if (!visible && !context.isCancelled) {
+        [strongSelf->_dimHost removeFromSuperview];
+        strongSelf->_dimHost = nil;
+        strongSelf->_dimFill = nil;
+      } else {
+        [strongSelf updateOwnedDimmer];
+      }
+    }];
+  if (!queued) {
+    _dimmerTransitioning = NO;
+    _dimFill.alpha = target;
+    _dimHost.hidden = !visible || !active;
+    _dimHost.userInteractionEnabled = visible && active && !self.presentedViewController;
+  }
+}
+
+- (void)restoreEdgeCompensation {
+  // Do not overwrite a transform UIKit has since taken ownership of.
+  if (_compensatedSurface && CGAffineTransformEqualToTransform(_compensatedSurface.transform, _surfaceAppliedTransform)) {
+    _compensatedSurface.transform = _surfaceOriginalTransform;
+  }
+  if (_compensatedShadow && _compensatedShadow.layer.shadowOpacity == 0) {
+    _compensatedShadow.layer.shadowOpacity = _originalShadowOpacity;
+  }
+  _compensatedSurface = nil;
+  _compensatedShadow = nil;
+}
+
+- (BOOL)usesEdgeToEdgePage {
+  CGFloat availableWidth = CGRectGetWidth((self.view.window ?: self.presentingViewController.view.window).bounds);
+  if (availableWidth <= 0) availableWidth = CGRectGetWidth(UIScreen.mainScreen.bounds);
+  BOOL narrowerWidth = self.maxContentWidth && self.maxContentWidth.doubleValue < availableWidth - 0.5;
+  return self.edgeToEdge && UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone &&
+    self.presentation == TrueSheetViewPresentation::Page && !narrowerWidth;
+}
+
+- (void)updateEdgeCompensation {
+  BOOL eligible = [self usesEdgeToEdgePage] && !self.presentedViewController;
+  if (@available(iOS 26.0, *)) {
+    eligible = eligible && !self.isDesignCompatibilityMode;
+  } else {
+    eligible = NO;
+  }
+  if (!eligible) {
+    [self restoreEdgeCompensation];
+    return;
+  }
+  // Preserve our resting decoration correction during legitimate motion.
+  // Recomputing from an animated frame would cancel the drag/keyboard animation.
+  if (_isDragging || _isInteractiveDismiss || _keyboardSheetGrown || self.isBeingDismissed ||
+      (_isTransitioning && _compensatedSurface)) return;
+  UIView *container = self.sheet.containerView;
+  if (!container) return;
+  UIView *surface = self.view;
+  for (NSUInteger depth = 0; surface.superview && surface.superview != container && depth < 8; depth++) {
+    UIView *ancestor = surface.superview;
+    // This is the only private class probe: a bounded ancestor of our own view.
+    if ([NSStringFromClass(ancestor.class) containsString:@"UIDropShadowView"]) {
+      CGAffineTransform t = ancestor.transform;
+      if (!truesheet::canCompensate(t.a, t.b, t.c, t.d, t.tx, t.ty)) return;
+      if (_compensatedSurface && _compensatedSurface != surface) [self restoreEdgeCompensation];
+      if (!_compensatedSurface && !CGAffineTransformIsIdentity(surface.transform)) return;
+      if (_compensatedSurface && !CGAffineTransformEqualToTransform(surface.transform, _surfaceAppliedTransform)) {
+        [self restoreEdgeCompensation];
+        return;
+      }
+      // Measure the uncorrected surface without temporarily mutating UIKit views.
+      // Frame-only floating insets (including a short sheet's bottom gap) are
+      // corrected too; the bounds/content/detent size remains untouched.
+      CGSize size = surface.bounds.size;
+      CGRect baseFrame = CGRectMake(surface.center.x - size.width / 2,
+                                    surface.center.y - size.height / 2, size.width, size.height);
+      CGRect base = [ancestor convertRect:baseFrame toView:container];
+      CGFloat leftGap = CGRectGetMinX(base) - CGRectGetMinX(container.bounds);
+      CGFloat rightGap = CGRectGetMaxX(container.bounds) - CGRectGetMaxX(base);
+      CGFloat bottomGap = CGRectGetMaxY(container.bounds) - CGRectGetMaxY(base);
+      if (size.width <= 0 || size.height <= 0 || leftGap < -0.5 || rightGap < -0.5 ||
+          leftGap > 40 || rightGap > 40 || bottomGap < -0.5 || bottomGap > 40) return;
+      if (!_compensatedSurface) {
+        _compensatedSurface = surface;
+        _compensatedShadow = ancestor;
+        _surfaceOriginalTransform = surface.transform;
+        _originalShadowOpacity = ancestor.layer.shadowOpacity;
+      }
+      CGPoint targetCenter = CGPointMake(CGRectGetMidX(container.bounds),
+                                         CGRectGetMaxY(container.bounds) - size.height / 2);
+      CGPoint centerInParent = [container convertPoint:targetCenter toView:ancestor];
+      _surfaceAppliedTransform = CGAffineTransformMake(CGRectGetWidth(container.bounds) / (size.width * t.a),
+        0, 0, 1 / t.d, centerInParent.x - surface.center.x, centerInParent.y - surface.center.y);
+      if (!CGAffineTransformEqualToTransform(surface.transform, _surfaceAppliedTransform)) {
+        surface.transform = _surfaceAppliedTransform;
+      }
+      ancestor.layer.shadowOpacity = 0;
+      return;
+    }
+    surface = ancestor;
+  }
+  [self restoreEdgeCompensation];
+}
+
+- (void)removeOwnedChrome {
+  [self restoreEdgeCompensation];
+  _dimmerGeneration++;
+  _dimmerTransitioning = NO;
+  [_dimHost removeFromSuperview];
+  _dimHost = nil;
+  _dimFill = nil;
+  [_surfaceBackgroundView removeFromSuperview];
+  _surfaceBackgroundView = nil;
+  [_topBorderLayer removeFromSuperlayer];
+  _topBorderLayer = nil;
+  if (_chromeSurface.layer.mask == _cornerMask) _chromeSurface.layer.mask = _previousSurfaceMask;
+  _cornerMask = nil;
+  _previousSurfaceMask = nil;
+  _chromeSurface = nil;
+  _chromeBounds = CGRectNull;
+  _systemCornerRadius = 0;
+}
+
+- (void)updateSheetChrome {
+  UIView *surface = self.presentedView;
+  if (!surface || !self.view.window) return;
+  UIView *candidate = self.view;
+  for (NSUInteger depth = 0; candidate.superview && candidate.superview != self.sheet.containerView && depth < 8; depth++) {
+    if ([NSStringFromClass(candidate.superview.class) containsString:@"UIDropShadowView"]) {
+      surface = candidate;
+      break;
+    }
+    candidate = candidate.superview;
+  }
+  [self updateEdgeCompensation];
+  if (_chromeSurface != surface) {
+    if (_chromeSurface.layer.mask == _cornerMask) _chromeSurface.layer.mask = _previousSurfaceMask;
+    [_topBorderLayer removeFromSuperlayer];
+    [_surfaceBackgroundView removeFromSuperview];
+    _chromeSurface = surface;
+    _previousSurfaceMask = surface.layer.mask;
+    _chromeBounds = CGRectNull;
+  }
+
+  if (self.backgroundColor) {
+    if (!_surfaceBackgroundView) {
+      _surfaceBackgroundView = [UIView new];
+      _surfaceBackgroundView.userInteractionEnabled = NO;
+      _surfaceBackgroundView.accessibilityElementsHidden = YES;
+    }
+    if (_surfaceBackgroundView.superview != surface) {
+      UIView *contentBranch = self.view;
+      for (NSUInteger depth = 0; contentBranch.superview && contentBranch.superview != surface && depth < 8; depth++) {
+        contentBranch = contentBranch.superview;
+      }
+      if (contentBranch.superview == surface) {
+        [surface insertSubview:_surfaceBackgroundView belowSubview:contentBranch];
+      } else {
+        [surface insertSubview:_surfaceBackgroundView atIndex:0];
+      }
+    }
+    _surfaceBackgroundView.frame = surface.bounds;
+    _surfaceBackgroundView.backgroundColor = self.backgroundColor;
+  } else {
+    [_surfaceBackgroundView removeFromSuperview];
+    _surfaceBackgroundView = nil;
+  }
+
+  BOOL independent = self.topLeftCornerRadius != nil || self.topRightCornerRadius != nil;
+  // Read UIKit's actual radius before asking it to stop symmetric clipping.
+  if (!independent || _systemCornerRadius == 0) {
+    if (!independent) _systemCornerRadius = 0;
+    UIView *ancestor = surface;
+    for (NSUInteger depth = 0; ancestor && ancestor != self.sheet.containerView && depth < 8; depth++) {
+      _systemCornerRadius = fmax(_systemCornerRadius, ancestor.layer.cornerRadius);
+      ancestor = ancestor.superview;
+    }
+    for (UIView *child in surface.subviews) {
+      _systemCornerRadius = fmax(_systemCornerRadius, child.layer.cornerRadius);
+    }
+  }
+  CGFloat fallback = self.cornerRadius ? self.cornerRadius.doubleValue : _systemCornerRadius;
+  auto corners = truesheet::topCorners(CGRectGetWidth(surface.bounds), CGRectGetHeight(surface.bounds),
+    self.topLeftCornerRadius ? self.topLeftCornerRadius.doubleValue : fallback,
+    self.topRightCornerRadius ? self.topRightCornerRadius.doubleValue : fallback);
+  BOOL floatingBottom = UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPhone ||
+    self.presentation == TrueSheetViewPresentation::Form;
+  if (@available(iOS 26.0, *)) floatingBottom = ![self usesEdgeToEdgePage];
+  CGFloat bottomRadius = independent && floatingBottom
+    ? fmin(truesheet::nonnegative(fallback), fmin(CGRectGetWidth(surface.bounds) / 2,
+        CGRectGetHeight(surface.bounds) - fmax(corners.left, corners.right))) : 0;
+  CGFloat width = fmin(truesheet::nonnegative(self.topBorderWidth),
+                       fmin(CGRectGetWidth(surface.bounds), CGRectGetHeight(surface.bounds)));
+  if (independent) {
+    self.sheet.preferredCornerRadius = 0;
+    if (!_cornerMask) _cornerMask = [CAShapeLayer layer];
+    surface.layer.mask = _cornerMask;
+  } else if (surface.layer.mask == _cornerMask) {
+    surface.layer.mask = _previousSurfaceMask;
+  }
+  if (width > 0) {
+    if (!_topBorderLayer) {
+      _topBorderLayer = [CAShapeLayer layer];
+      _topBorderLayer.fillColor = nil;
+      _topBorderLayer.lineCap = kCALineCapButt;
+    }
+    if (_topBorderLayer.superlayer != surface.layer) [surface.layer addSublayer:_topBorderLayer];
+    _topBorderLayer.hidden = NO;
+    _topBorderLayer.strokeColor = [(self.topBorderColor ?: UIColor.separatorColor)
+      resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+    _topBorderLayer.lineWidth = width;
+  } else {
+    _topBorderLayer.hidden = YES;
+  }
+
+  if (CGRectEqualToRect(_chromeBounds, surface.bounds) && _chromeLeftRadius == corners.left &&
+      _chromeRightRadius == corners.right && _chromeBorderWidth == width &&
+      _chromeBottomRadius == bottomRadius && _chromeIndependentCorners == independent) return;
+  _chromeIndependentCorners = independent;
+  _chromeBounds = surface.bounds;
+  _chromeLeftRadius = corners.left;
+  _chromeRightRadius = corners.right;
+  _chromeBorderWidth = width;
+  _chromeBottomRadius = bottomRadius;
+  CGFloat w = CGRectGetWidth(surface.bounds);
+  CGFloat h = CGRectGetHeight(surface.bounds);
+  CGFloat l = corners.left, r = corners.right;
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  if (independent) {
+    UIBezierPath *mask = [UIBezierPath bezierPath];
+    [mask moveToPoint:CGPointMake(0, h - bottomRadius)];
+    [mask addLineToPoint:CGPointMake(0, l)];
+    if (l > 0) [mask addArcWithCenter:CGPointMake(l, l) radius:l startAngle:M_PI endAngle:1.5 * M_PI clockwise:YES];
+    [mask addLineToPoint:CGPointMake(w - r, 0)];
+    if (r > 0) [mask addArcWithCenter:CGPointMake(w - r, r) radius:r startAngle:1.5 * M_PI endAngle:2 * M_PI clockwise:YES];
+    [mask addLineToPoint:CGPointMake(w, h - bottomRadius)];
+    if (bottomRadius > 0) {
+      [mask addArcWithCenter:CGPointMake(w - bottomRadius, h - bottomRadius) radius:bottomRadius
+                 startAngle:0 endAngle:M_PI_2 clockwise:YES];
+    }
+    [mask addLineToPoint:CGPointMake(bottomRadius, h)];
+    if (bottomRadius > 0) {
+      [mask addArcWithCenter:CGPointMake(bottomRadius, h - bottomRadius) radius:bottomRadius
+                 startAngle:M_PI_2 endAngle:M_PI clockwise:YES];
+    }
+    [mask closePath];
+    _cornerMask.frame = surface.bounds;
+    _cornerMask.path = mask.CGPath;
+  }
+  if (width > 0) {
+    CGFloat inset = width / 2;
+    CGFloat left = fmax(l - inset, 0), right = fmax(r - inset, 0);
+    UIBezierPath *border = [UIBezierPath bezierPath];
+    [border moveToPoint:CGPointMake(inset, fmax(l, inset))];
+    if (left > 0) [border addArcWithCenter:CGPointMake(l, l) radius:left startAngle:M_PI endAngle:1.5 * M_PI clockwise:YES];
+    [border addLineToPoint:CGPointMake(w - fmax(r, inset), inset)];
+    if (right > 0) [border addArcWithCenter:CGPointMake(w - r, r) radius:right startAngle:1.5 * M_PI endAngle:2 * M_PI clockwise:YES];
+    _topBorderLayer.frame = surface.bounds;
+    _topBorderLayer.path = border.CGPath;
+  }
+  [CATransaction commit];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+  [super traitCollectionDidChange:previousTraitCollection];
+  [self updateSheetChrome];
+  [self updateOwnedDimmer];
+}
+
 - (void)setupBackground {
   auto effectiveBackgroundBlur = self.backgroundBlur;
   if (@available(iOS 26.0, *)) {
@@ -1137,7 +1576,9 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   if (@available(iOS 26.1, *)) {
     if (!self.isDesignCompatibilityMode) {
       if (self.backgroundColor || hasBlur) {
-        self.sheet.backgroundEffect = [UIColorEffect effectWithColor:[UIColor clearColor]];
+        BOOL independent = self.topLeftCornerRadius != nil || self.topRightCornerRadius != nil;
+        self.sheet.backgroundEffect = [UIColorEffect effectWithColor:
+          independent ? UIColor.clearColor : (self.backgroundColor ?: UIColor.clearColor)];
       } else {
         self.sheet.backgroundEffect = nil;
       }
@@ -1146,6 +1587,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 #endif
 
   self.view.backgroundColor = self.backgroundColor;
+  [self updateSheetChrome];
 }
 
 - (void)setupGrabber {
@@ -1273,7 +1715,9 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   // `widthFollowsPreferredContentSizeWhenEdgeAttached` only takes effect
   // when the sheet is edge-attached (Apple API constraint).
   BOOL formSheet = self.presentation == facebook::react::TrueSheetViewPresentation::Form;
-  BOOL hasMaxWidth = self.maxContentWidth != nil && !formSheet;
+  // A phone page's full-window cap is not a request for a narrow floating sheet.
+  // Keep that cap meaningful on iPad and when edge-to-edge is not requested.
+  BOOL hasMaxWidth = self.maxContentWidth != nil && !formSheet && ![self usesEdgeToEdgePage];
 
   if (@available(iOS 17.0, *)) {
     sheet.prefersPageSizing = !formSheet && !hasMaxWidth;
@@ -1306,6 +1750,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
   [self setupBackground];
   [self setupGrabber];
+  [self updateOwnedDimmer];
 }
 
 #pragma mark - UISheetPresentationControllerDelegate
@@ -1317,6 +1762,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 - (void)sheetPresentationControllerDidChangeSelectedDetentIdentifier:
   (UISheetPresentationController *)sheetPresentationController {
   dispatch_async(dispatch_get_main_queue(), ^{
+    [self updateOwnedDimmer];
     NSInteger index = self.currentDetentIndex;
     if (index >= 0) {
       CGFloat detent = [self detentValueForIndex:index];

@@ -123,6 +123,28 @@ class TrueSheetViewManager :
     view.setCornerRadius(radius.dpToPx())
   }
 
+  // iOS presentation chrome; explicitly consume the shared Fabric interface.
+  @ReactProp(name = "edgeToEdge", defaultBoolean = false)
+  override fun setEdgeToEdge(view: TrueSheetView, value: Boolean) = Unit
+
+  @ReactProp(name = "topBorderWidth", defaultDouble = 0.0)
+  override fun setTopBorderWidth(view: TrueSheetView, value: Double) = Unit
+
+  @ReactProp(name = "topBorderColor", customType = "Color")
+  override fun setTopBorderColor(view: TrueSheetView, value: Int?) = Unit
+
+  @ReactProp(name = "topLeftCornerRadius", defaultDouble = -1.0)
+  override fun setTopLeftCornerRadius(view: TrueSheetView, value: Double) = Unit
+
+  @ReactProp(name = "topRightCornerRadius", defaultDouble = -1.0)
+  override fun setTopRightCornerRadius(view: TrueSheetView, value: Double) = Unit
+
+  @ReactProp(name = "dimColor", customType = "Color")
+  override fun setDimColor(view: TrueSheetView, value: Int?) = Unit
+
+  @ReactProp(name = "dimOpacity", defaultDouble = -1.0)
+  override fun setDimOpacity(view: TrueSheetView, value: Double) = Unit
+
   @ReactProp(name = "grabber", defaultBoolean = true)
   override fun setGrabber(view: TrueSheetView, grabber: Boolean) {
     view.setGrabber(grabber)

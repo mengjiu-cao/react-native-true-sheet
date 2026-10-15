@@ -66,10 +66,16 @@ export interface NativeProps extends ViewProps {
   maxContentHeight?: WithDefault<Double, 0>;
   maxContentWidth?: WithDefault<Double, 0>;
   cornerRadius?: WithDefault<Double, -1>;
+  topBorderWidth?: WithDefault<Double, 0>;
+  topLeftCornerRadius?: WithDefault<Double, -1>;
+  topRightCornerRadius?: WithDefault<Double, -1>;
+  dimOpacity?: WithDefault<Double, -1>;
   elevation?: WithDefault<Double, -1>;
 
   // Color properties
   backgroundColor?: ColorValue;
+  topBorderColor?: ColorValue;
+  dimColor?: ColorValue;
   initialDetentIndex?: WithDefault<Int32, -1>;
   dimmedDetentIndex?: WithDefault<Int32, 0>;
 
@@ -114,6 +120,7 @@ export interface NativeProps extends ViewProps {
   dismissible?: WithDefault<boolean, true>;
   draggable?: WithDefault<boolean, true>;
   dimmed?: WithDefault<boolean, true>;
+  edgeToEdge?: WithDefault<boolean, false>;
   initialDetentAnimated?: WithDefault<boolean, true>;
   scrollable?: WithDefault<boolean, false>;
   scrollableOptions?: ScrollableOptionsType;

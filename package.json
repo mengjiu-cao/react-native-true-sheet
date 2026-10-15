@@ -1,6 +1,6 @@
 {
   "name": "@lodev09/react-native-true-sheet",
-  "version": "3.11.14",
+  "version": "3.11.14-smartx.1",
   "description": "The true native bottom sheet experience for your React Native Apps.",
   "source": "./src/index.ts",
   "main": "./lib/module/index.js",
@@ -70,14 +70,14 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lodev09/react-native-true-sheet.git"
+    "url": "git+https://github.com/mengjiu-cao/react-native-true-sheet.git"
   },
   "author": "Jovanni Lo <lodev09@gmail.com> (https://github.com/lodev09)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/lodev09/react-native-true-sheet/issues"
+    "url": "https://github.com/mengjiu-cao/react-native-true-sheet/issues"
   },
-  "homepage": "https://sheet.lodev09.com",
+  "homepage": "https://github.com/mengjiu-cao/react-native-true-sheet#readme",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },

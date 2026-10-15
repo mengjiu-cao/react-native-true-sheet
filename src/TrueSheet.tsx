@@ -477,6 +477,13 @@ export class TrueSheet
       backgroundBlur,
       blurOptions,
       cornerRadius,
+      edgeToEdge = false,
+      topBorderWidth,
+      topBorderColor,
+      topLeftCornerRadius,
+      topRightCornerRadius,
+      dimColor,
+      dimOpacity,
       maxContentHeight,
       maxContentWidth,
       anchor = 'center',
@@ -526,6 +533,13 @@ export class TrueSheet
         blurOptions={blurOptions}
         backgroundColor={backgroundColor}
         cornerRadius={cornerRadius}
+        edgeToEdge={edgeToEdge}
+        topBorderWidth={topBorderWidth}
+        topBorderColor={topBorderColor}
+        topLeftCornerRadius={topLeftCornerRadius}
+        topRightCornerRadius={topRightCornerRadius}
+        dimColor={dimColor}
+        dimOpacity={dimOpacity}
         grabber={grabber}
         grabberOptions={this.resolvedGrabberOptions}
         accessibilityOptions={accessibilityOptions}

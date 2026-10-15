@@ -102,7 +102,13 @@ object ScreenUtils {
    * @param reactContext The ReactContext to get resources from
    * @return Screen height in pixels
    */
-  fun getScreenHeight(reactContext: ReactContext): Int = reactContext.resources.displayMetrics.heightPixels
+  // Some edge-to-edge OEMs exclude the status bar from resource display metrics.
+  fun getScreenHeight(reactContext: ReactContext): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      getRealScreenHeight(reactContext)
+    } else {
+      reactContext.resources.displayMetrics.heightPixels
+    }
 
   /**
    * Get the location of a view in screen coordinates

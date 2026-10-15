@@ -404,6 +404,66 @@ export interface TrueSheetProps extends ViewProps {
   cornerRadius?: number;
 
   /**
+   * Removes the external system inset/scale on iPhone page sheets.
+   * Does not change iPad form sheets or the `maxContentWidth` constraint.
+   *
+   * @platform ios
+   * @default false
+   */
+  edgeToEdge?: boolean;
+
+  /**
+   * Width of the border along the top edge and upper corners only.
+   * Does not affect content layout.
+   *
+   * @platform ios
+   * @default 0
+   */
+  topBorderWidth?: number;
+
+  /**
+   * Color of the top border.
+   * Uses the system separator color when omitted.
+   *
+   * @platform ios
+   */
+  topBorderColor?: ColorValue;
+
+  /**
+   * Overrides the top-left radius. Zero produces a sharp corner.
+   * When omitted, uses `cornerRadius` or the system default.
+   *
+   * @platform ios
+   */
+  topLeftCornerRadius?: number;
+
+  /**
+   * Overrides the top-right radius. Zero produces a sharp corner.
+   * When omitted, uses `cornerRadius` or the system default.
+   *
+   * @platform ios
+   */
+  topRightCornerRadius?: number;
+
+  /**
+   * Custom backdrop color. When both dim props are omitted, uses system dimming.
+   * Respects `dimmed` and `dimmedDetentIndex`.
+   * Defaults to black when only `dimOpacity` is provided.
+   *
+   * @platform ios
+   */
+  dimColor?: ColorValue;
+
+  /**
+   * Custom backdrop opacity (0-1). Zero is fully transparent.
+   * When both dim props are omitted, uses system dimming.
+   * Defaults to 0.5 when only `dimColor` is provided.
+   *
+   * @platform ios
+   */
+  dimOpacity?: number;
+
+  /**
    * Shows a native grabber (or drag handle) on the sheet.
    *
    * iOS uses the native `UISheetPresentationController` grabber.

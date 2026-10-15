@@ -61,6 +61,13 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) NSNumber *peekContentHeight;
 @property (nonatomic, strong, nullable) UIColor *backgroundColor;
 @property (nonatomic, strong, nullable) NSNumber *cornerRadius;
+@property (nonatomic, assign) BOOL edgeToEdge;
+@property (nonatomic, assign) CGFloat topBorderWidth;
+@property (nonatomic, strong, nullable) UIColor *topBorderColor;
+@property (nonatomic, strong, nullable) NSNumber *topLeftCornerRadius;
+@property (nonatomic, strong, nullable) NSNumber *topRightCornerRadius;
+@property (nonatomic, strong, nullable) UIColor *dimColor;
+@property (nonatomic, strong, nullable) NSNumber *dimOpacity;
 @property (nonatomic, assign) BOOL grabber;
 @property (nonatomic, strong, nullable) GrabberOptions *grabberOptions;
 @property (nonatomic, assign) facebook::react::TrueSheetViewAccessibilityOptionsStruct accessibilityOptions;

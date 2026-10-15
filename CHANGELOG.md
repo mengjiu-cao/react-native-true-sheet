@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 3.11.14-smartx.1
+
+- iOS：增加 opt-in `edgeToEdge` 手机 page sheet 容器修正，参考 native-sheet 去除系统装饰缩放/外围留白，保留 iPad/form/窄宽度布局。
+- iOS：原生 surface 背景与 `dimColor`/`dimOpacity` 蒙层；转场淡出、取消恢复、关闭锁及透明模态触摸由库管理，不再依赖应用 DimmingView 补丁。
+- iOS：增加 `topBorderWidth`/`topBorderColor` 与独立 `topLeftCornerRadius`/`topRightCornerRadius`，默认不绘制新边框、不改变现有圆角。
+- 并入 SmartX 的 iOS 输入框已在键盘上方时不反复滚动、Android API 30+ 窗口高度修正，应用可整体移除旧补丁。
+- 保持 3.11.14 JS API 与内容样式；原生变化需要重建安装包。UIKit 内部呈现层兼容和视觉仍需设备验证。
+
 ## 3.11.14
 
 ### 🐛 Bug fixes

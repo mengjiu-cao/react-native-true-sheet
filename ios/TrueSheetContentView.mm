@@ -310,6 +310,16 @@ using namespace facebook::react;
     return;
   }
 
+  // Candidate-bar/caret updates must not keep scrolling an already visible field.
+  UIWindow *window = firstResponder.window;
+  if (window) {
+    CGRect frame = [firstResponder convertRect:firstResponder.bounds toView:window];
+    CGFloat keyboardTop = CGRectGetHeight(window.bounds) - _keyboardObserver.currentHeight;
+    if (CGRectGetMaxY(frame) <= keyboardTop - 8) {
+      return;
+    }
+  }
+
   dispatch_async(dispatch_get_main_queue(), ^{
     [self scrollToFocusedCaretAnimated:YES];
   });

@@ -194,6 +194,15 @@ using namespace facebook::react;
 
   // Corner radius
   _controller.cornerRadius = newProps.cornerRadius < 0 ? nil : @(newProps.cornerRadius);
+  _controller.edgeToEdge = newProps.edgeToEdge;
+  _controller.topBorderWidth = newProps.topBorderWidth;
+  _controller.topBorderColor = RCTUIColorFromSharedColor(newProps.topBorderColor);
+  _controller.topLeftCornerRadius =
+    newProps.topLeftCornerRadius < 0 ? nil : @(newProps.topLeftCornerRadius);
+  _controller.topRightCornerRadius =
+    newProps.topRightCornerRadius < 0 ? nil : @(newProps.topRightCornerRadius);
+  _controller.dimColor = RCTUIColorFromSharedColor(newProps.dimColor);
+  _controller.dimOpacity = newProps.dimOpacity < 0 ? nil : @(newProps.dimOpacity);
 
   // Content height
   _controller.maxContentHeight = newProps.maxContentHeight != 0.0 ? @(newProps.maxContentHeight) : nil;

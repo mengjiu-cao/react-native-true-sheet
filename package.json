@@ -54,8 +54,7 @@
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "tidy": "yarn typecheck && yarn lint && yarn format && scripts/objclint.sh && scripts/ktlint.sh",
     "clean": "scripts/clean.sh",
-    "prepare": "bob build",
-    "prepack": "bob build",
+    "build:lib": "bob build",
     "release": "release-it",
     "release:beta": "yarn release --preRelease=beta --no-github.release"
   },

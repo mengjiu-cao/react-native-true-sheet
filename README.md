@@ -149,9 +149,14 @@ SmartX 接入时不设置新的 border/radius 值，保持现有主题、抓手�
 该系统内部结构不是公共 API，不能把采用自有 root view 等同于去除了私有层级依赖。
 纯几何烟测与原生编译不等于实际设备上的拖拽取消、堆叠和键盘验收。
 
-构建与离线接入：`yarn install --immutable` → `yarn prepare` →
+Git 接入：`pnpm add @lodev09/react-native-true-sheet@github:mengjiu-cao/react-native-true-sheet#smartx-ios-sheet`。
+分支随源码提交 `lib/` 的 JS 和类型产物，不配置 `prepare` / `prepack` 自动构建钩子；
+应用安装时无需 Yarn 或本库的开发依赖。已有应用需定向更新该依赖的锁文件，旧 SHA 不会自动切换。
+
+维护者修改源码后运行 `yarn install --immutable` → `yarn build:lib`，并将源码与 `lib/` 一起提交。
+不要恢复安装期构建钩子；打包不会自动构建，离线包请在构建后执行
 `yarn pack --out <输出目录>/react-native-true-sheet-3.11.14-smartx.2.tgz`。
-应用通过仓库内 `file:` tarball 锁定本版本，无个人绝对路径依赖；更新原生代码后须重建开发包，JS reload 不生效。
+应用可用 `file:` tarball 离线接入；更新原生代码后须重建开发包，JS reload 不生效。
 
 ## AI Skills
 

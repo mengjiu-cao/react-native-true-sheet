@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 🐛 Bug fixes
+
+- Git 安装直接使用随源码提交的 JS 与类型产物，移除安装期构建钩子，避免消费端因缺少 Yarn 而安装失败；维护者通过 `yarn build:lib` 显式更新产物。
+
 ## 3.11.14-smartx.2
 
 - iOS：采用 native-sheet 的 root UIView 背景承载与局部逆缩放，保留系统 page sheet 和转场，以及 TrueSheet 档位、内容挂载、手势与键盘 owner；不引入其他呈现框架。

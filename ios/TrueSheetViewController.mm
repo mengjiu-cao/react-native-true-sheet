@@ -504,8 +504,15 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     self.view.window.accessibilityElements = nil;
   }
 
-  // UIKit owns the parent scale while stacking another controller.
-  [self restoreEdgeCompensation];
+  // Keep the resting edge compensation while another sheet covers us. UIKit
+  // animates its own wrapper; removing our inverse transform here leaves the
+  // parent inset until dismissal completes, then makes it jump back to full width.
+  if ([viewControllerToPresent isKindOfClass:[TrueSheetViewController class]]) {
+    [_edgeTouchView removeFromSuperview];
+    _edgeTouchView = nil;
+  } else {
+    [self restoreEdgeCompensation];
+  }
   [super presentViewController:viewControllerToPresent animated:flag completion:completion];
 }
 
@@ -1365,8 +1372,16 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (void)updateEdgeCompensation {
-  if (![self usesEdgeToEdgePage] || self.presentedViewController) {
+  BOOL coveredBySheet = [self.presentedViewController isKindOfClass:[TrueSheetViewController class]];
+  if (![self usesEdgeToEdgePage] || (self.presentedViewController && !coveredBySheet)) {
     [self restoreEdgeCompensation];
+    return;
+  }
+  if (coveredBySheet) {
+    // Do not learn the nested transition's scale as our resting compensation.
+    // The existing focus/dismiss callbacks refresh it after UIKit unlinks the child.
+    [_edgeTouchView removeFromSuperview];
+    _edgeTouchView = nil;
     return;
   }
   UIView *container = self.sheet.containerView;
@@ -1521,7 +1536,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
 #if RNTS_IPHONE_OS_VERSION_AVAILABLE(26_1) && !TARGET_OS_MACCATALYST
   if (@available(iOS 26.1, *)) {
-    if (!self.isDesignCompatibilityMode) {
+    // Some 26.1 builds ship `_UIFormSheetPresentationController` without this setter
+    if (!self.isDesignCompatibilityMode && [self.sheet respondsToSelector:@selector(setBackgroundEffect:)]) {
       if (self.backgroundColor || hasBlur) {
         BOOL independent = self.topLeftCornerRadius != nil || self.topRightCornerRadius != nil;
         self.sheet.backgroundEffect = [UIColorEffect effectWithColor:
